@@ -13,3 +13,8 @@ variable "monthly_budget_usd" {
   type        = string
   default     = "10"
 }
+
+variable "github_repo" {
+  description = "GitHub Actions OIDC が assume するリポジトリ（例: Yu-be-shi/ys-infrastructure）"
+  type        = string
+}

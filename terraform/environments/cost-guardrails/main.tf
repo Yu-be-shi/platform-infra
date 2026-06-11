@@ -46,6 +46,55 @@ resource "aws_sns_topic_policy" "alerts" {
   policy = data.aws_iam_policy_document.sns_publish.json
 }
 
+# ── GitHub Actions OIDC ─────────────────────────────────────────────────────
+# GitHub Actions が AssumeRoleWithWebIdentity で一時認証情報を取得できるようにする。
+# 長期アクセスキー（AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY）を廃止し OIDC に移行する。
+# この OIDC プロバイダーとロールは恒久リソースとして cost-guardrails で管理する
+# （prod スタックは ephemeral のため、ここに置かないと down のたびに消えてしまう）。
+
+data "aws_iam_policy_document" "github_actions_assume" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_repo}:*"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+  # GitHub の OIDC サムプリントは複数あり変更される。AWS は IAM の自動サムプリント更新で
+  # 管理するため、ダミー値（64 文字の "0"×40）をプレースホルダとして置く。
+  # https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc_verify-thumbprint.html
+  thumbprint_list = ["0000000000000000000000000000000000000000"]
+}
+
+resource "aws_iam_role" "github_actions" {
+  name               = "github-actions-prod-deploy"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_assume.json
+  description        = "GitHub Actions が prod-switch.yml で使用する OIDC ロール"
+}
+
+# 本番 ephemeral 構築/削除に必要な権限。個人プロジェクトのため AdministratorAccess を使用。
+# スコープを絞る場合は EC2・ECS・RDS・IAM・CloudWatch・S3・Secrets Manager・ECR の
+# 必要アクションに限定した Policy を inline で定義する。
+resource "aws_iam_role_policy_attachment" "github_actions_admin" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
 # 月次コスト予算。実コストが閾値%を超えたら通知、予測が 100% 超でも通知。
 resource "aws_budgets_budget" "monthly" {
   name         = "character-system-monthly"

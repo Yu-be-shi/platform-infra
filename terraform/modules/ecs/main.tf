@@ -75,11 +75,22 @@ resource "aws_security_group" "ecs" {
     security_groups = [var.alb_security_group_id]
   }
 
+  # Secrets Manager・ECR・CloudWatch Logs はすべて HTTPS（443）。NAT 経由でインターネットへ。
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS to AWS services (Secrets Manager, ECR, CloudWatch Logs)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # RDS PostgreSQL（ポート 5432）。RDS SG に対してのみ許可（最小権限）。
+  egress {
+    description     = "PostgreSQL to RDS"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [var.rds_security_group_id]
   }
 
   tags = var.tags
@@ -204,6 +215,9 @@ resource "aws_ecs_service" "api" {
 # alarm_actions が空なら通知はされず記録のみ（コスト最小）。SNS 等を渡せば通知される。
 
 resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
+  # ephemeral 環境では up/down のたびにアラームが生き死にするのは矛盾。
+  # ephemeral=true（使い捨て prod）ではアラームを作らず、恒久構成時のみ有効にする。
+  count               = var.ephemeral ? 0 : 1
   alarm_name          = "${var.service_name}-cpu-high"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
@@ -223,6 +237,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ecs_no_running_tasks" {
+  count               = var.ephemeral ? 0 : 1
   alarm_name          = "${var.service_name}-no-running-tasks"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
