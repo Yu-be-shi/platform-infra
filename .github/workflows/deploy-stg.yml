@@ -1,33 +1,34 @@
-# STG（自宅サーバー）への API スタックデプロイ。
-# 前提は character-db-infra の deploy-stg.yml と同じ（self-hosted runner ラベル character-stg、
-# $STG_ROOT 配下に全リポジトリ clone 済み）。DB スタックが先に起動済みであること。
+# STG（自宅サーバー）へのキャラクター基盤スタック（PostgreSQL + migrate + API）デプロイ。
+# 中央プラットフォームが character-db-net を作成し DB/API を起動する（旧 db-infra + api-infra の
+# 2 スタックを1つに統合）。アプリ(Next.js)スタックは別 deploy-stg で character-db-net に参加する。
+# 前提: self-hosted runner ラベル character-stg、$STG_ROOT 配下に platform-infra と
+#       apis/character-api-go が clone 済み。
 name: Deploy STG (home)
 
-# STG は `staging` ブランチの鏡。develop マージでは STG を触らない。API 本体
-# （character-api-go）と本リポジトリの staging を反映する。staging へ promote するか
-# 手動（workflow_dispatch）でデプロイ。
+# STG は `staging` ブランチの鏡。develop マージでは STG を触らない。staging へ promote するか
+# 手動（workflow_dispatch）でデプロイ。runner オフライン時は queue → online で消化。
 on:
   push:
     branches: [staging]
   workflow_dispatch:
 
 concurrency:
-  group: stg-api
+  group: stg-backend
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: [self-hosted, character-stg]
     steps:
-      - name: Pull & up (Go API)
+      - name: Pull & up (PostgreSQL + migrate + API)
         env:
           STG_ROOT: ${{ vars.STG_ROOT }}
         run: |
-          set -euo pipefail
+          set -e
           ROOT="${STG_ROOT:-$HOME/character-system}"
-          # API 本体（ビルド元）と API インフラの両方を staging に最新化。
+          # API 本体（ビルド元：schema/migrations/Dockerfile を所有）と platform-infra を staging に最新化。
           git -C "$ROOT/apis/character-api-go" fetch origin staging && git -C "$ROOT/apis/character-api-go" reset --hard origin/staging
-          git -C "$ROOT/apis/character-api-go-infra" fetch origin staging && git -C "$ROOT/apis/character-api-go-infra" reset --hard origin/staging
-          cd "$ROOT/apis/character-api-go-infra"
-          # character-db-net / DB が起動済みである前提（DB スタックを先に up しておく）。
+          git -C "$ROOT/platform-infra" fetch origin staging && git -C "$ROOT/platform-infra" reset --hard origin/staging
+          cd "$ROOT/platform-infra"
+          # character-db-net を作成し、Postgres → migrate（atlas→views→seeds）→ API の順に起動する。
           docker compose up -d --build

@@ -9,34 +9,11 @@ variable "image_tag" {
   default     = "latest"
 }
 
-variable "vpc_id" {
-  type = string
-}
-
-variable "public_subnet_ids" {
-  description = "ALB を配置するパブリックサブネット ID"
-  type        = list(string)
-}
-
-variable "private_subnet_ids" {
-  description = "ECS タスクを配置するプライベートサブネット ID"
-  type        = list(string)
-}
-
-# ── db-infra の terraform output から取得して設定する ──────────────────────────
-
-variable "db_secret_arn" {
-  description = "DB 認証情報の Secrets Manager ARN（db-infra output: db_secret_arn）"
-  type        = string
-}
-
-variable "rds_security_group_id" {
-  description = "RDS のセキュリティグループ ID（db-infra output: rds_security_group_id）"
-  type        = string
-}
+# VPC / subnet / DB secret / RDS SG は中央が module.network・module.db で provision するため
+# 外部変数を廃止（旧 db-infra/api-infra 間の手動受け渡しは不要になった）。
 
 variable "api_key_secret_arn" {
-  description = "INTERNAL_API_KEY の Secrets Manager ARN（手動で作成して ARN を設定）"
+  description = "INTERNAL_API_KEY の Secrets Manager ARN（値は平文管理しないため別途作成して ARN を設定）"
   type        = string
 }
 
@@ -47,7 +24,7 @@ variable "cors_origins" {
 }
 
 variable "ephemeral" {
-  description = "使い捨て(up/down)環境か。true で destroy 容易な設定（ECR force_delete 等）になる"
+  description = "使い捨て(up/down)環境か。true で destroy 容易な設定（削除保護無効・final snapshot 無し・ECR force_delete 等）になる"
   type        = bool
   default     = true
 }

@@ -1,19 +1,52 @@
-# ローカル・CI 用: API 単体起動
+# ローカル・CI 用: キャラクター基盤スタック（PostgreSQL + マイグレーション + API + Redis）。
+# 中央プラットフォームが character-db-net を作成し、DB と API を起動する所有者。
+# アプリ(Next.js)スタックはこの character-db-net に external 接続する。
 #
-# 前提:
-#   1. character-db-infra/ で docker compose up -d を先に実行しておくこと
-#      (character-db-net ネットワークと DB が起動済みであること)
-#   2. 以下のレイアウトでリポジトリが配置されていること
-#      character-system/
-#      ├── apis/character-api-go/
-#      └── apis/character-api-go-infra/ (このファイル)
+# 前提レイアウト（$ROOT 配下）:
+#   character-system/
+#   ├── apis/character-api-go/   (API 本体 + schema/migrations + Dockerfile / Dockerfile.migrate)
+#   └── platform-infra/          (このファイル)
 #
 # 起動: docker compose up --build -d
 
 services:
+  # キャラクター DB（PostgreSQL）。スキーマ適用は character-db-migrate が行うため素の公式イメージ。
+  character-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${CHAR_DB_NAME:-characters}
+      POSTGRES_USER: ${CHAR_DB_USER:-app}
+      POSTGRES_PASSWORD: ${CHAR_DB_PASSWORD:-devpassword}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CHAR_DB_USER:-app} -d ${CHAR_DB_NAME:-characters}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - character-db-data:/var/lib/postgresql/data
+    networks:
+      - character-db-net
+
+  # マイグレーション（atlas apply → views → seeds）。schema/migrations を所有する
+  # character-api-go の Dockerfile.migrate からビルドする。
+  character-db-migrate:
+    build:
+      context: ../apis/character-api-go
+      dockerfile: Dockerfile.migrate
+    command:
+      - "--url=postgres://${CHAR_DB_USER:-app}:${CHAR_DB_PASSWORD:-devpassword}@character-db:5432/${CHAR_DB_NAME:-characters}?sslmode=disable"
+    depends_on:
+      character-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - character-db-net
+
   character-api:
     build:
-      context: ../character-api-go
+      context: ../apis/character-api-go
       dockerfile: Dockerfile
       target: runtime
     environment:
@@ -27,13 +60,16 @@ services:
     ports:
       - "8080:8080"
     depends_on:
+      character-db:
+        condition: service_healthy
+      character-db-migrate:
+        condition: service_completed_successfully
       character-api-redis:
         condition: service_healthy
     networks:
       - character-db-net
 
-  # character-api 専有の Redis（冪等キーの重複排除ストア）。
-  # 共有 DB(character-db) とは別物で、このサービスだけが使う private ストア。
+  # character-api 専有の Redis（冪等キーの重複排除ストア）。共有 DB とは別の private ストア。
   character-api-redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
@@ -45,7 +81,10 @@ services:
     networks:
       - character-db-net
 
+volumes:
+  character-db-data:
+
+# 中央が character-db-net を作成する（external ではない）。他スタックは external で参加。
 networks:
   character-db-net:
-    external: true
     name: character-db-net

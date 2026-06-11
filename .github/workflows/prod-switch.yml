@@ -2,18 +2,17 @@
 #
 # - 手動実行（Actions の Run workflow）で up / down を選ぶ。
 # - 毎日深夜に自動 down（消し忘れ＝課金しっぱなし防止のセーフティ）。
-# - データは永続させない方針（ephemeral=true で RDS は削除保護無効・final snapshot 無し）。
+# - 単一 state（network + RDS + migrate + ALB + ECS）を1回の apply で構築する。
+#   VPC/subnet も module.network が作るため、旧来の VPC/subnet 受け渡しや
+#   「DB→API→DB 再 apply」の循環解消ダンスは不要（API↔RDS の ingress は standalone ルール）。
+# - データは永続させない（ephemeral=true で RDS は削除保護無効・final snapshot 無し）。
 #   up のたびに seeds で初期データ（races 等）が再投入される。
 #
 # 必要な Secrets / Variables（リポジトリ設定）:
 #   secrets.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  … AWS 認証
-#   secrets.GH_PAT                                     … 他リポジトリ(db-infra/api/db) を checkout する PAT(repo 読み取り)
-#   secrets.TF_VAR_VPC_ID                              … 既存 VPC（switch では作らない・残す）
-#   secrets.TF_VAR_PUBLIC_SUBNET_IDS  (JSON 配列)      … ALB 用
-#   secrets.TF_VAR_PRIVATE_SUBNET_IDS (JSON 配列)      … ECS/RDS 用
-#   secrets.TF_VAR_API_KEY_SECRET_ARN                  … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch外で作成）
-#   vars.AWS_REGION (任意, 既定 ap-northeast-1) / vars.ECS_CLUSTER / vars.ECS_SERVICE / vars.AWS_ECR_REPOSITORY
-#   vars.CORS_ORIGINS (任意)
+#   secrets.GH_PAT                                     … character-api-go を checkout する PAT(repo 読み取り)
+#   secrets.TF_VAR_API_KEY_SECRET_ARN                  … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch 外で作成）
+#   vars.AWS_REGION (任意, 既定 ap-northeast-1) / vars.CORS_ORIGINS (任意)
 name: Prod Switch (AWS ephemeral)
 
 on:
@@ -37,12 +36,7 @@ concurrency:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
-  DB_TF: db-infra/terraform/environments/prod
-  API_TF: api-infra/terraform/environments/prod
-  # TF 変数（共通）。RDS/ECS いずれの apply でも使う。
-  TF_VAR_vpc_id: ${{ secrets.TF_VAR_VPC_ID }}
-  TF_VAR_public_subnet_ids: ${{ secrets.TF_VAR_PUBLIC_SUBNET_IDS }}
-  TF_VAR_private_subnet_ids: ${{ secrets.TF_VAR_PRIVATE_SUBNET_IDS }}
+  TF_DIR: terraform/environments/prod
   TF_VAR_api_key_secret_arn: ${{ secrets.TF_VAR_API_KEY_SECRET_ARN }}
   TF_VAR_cors_origins: ${{ vars.CORS_ORIGINS || '*' }}
   TF_VAR_ephemeral: "true"
@@ -61,24 +55,12 @@ jobs:
             echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # platform-infra（terraform）をルートに、API 本体（Dockerfile / Dockerfile.migrate / schema）を api/ に。
       - uses: actions/checkout@v4
-        with: { path: api-infra }
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/character-db-infra
-          path: db-infra
-          ref: main
-          token: ${{ secrets.GH_PAT }}
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/character-api-go
           path: api
-          ref: main
-          token: ${{ secrets.GH_PAT }}
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/character-db
-          path: db
           ref: main
           token: ${{ secrets.GH_PAT }}
 
@@ -88,35 +70,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
 
       # ───────────────────────── UP（構築）─────────────────────────
-      # 循環依存（RDS は API の SG を許可 / API は RDS の secret を必要）を3段で解す:
-      #   1) DB を api_sg 無しで apply（migrate タスクからのみ到達可能）
-      #   2) API を apply（ECS SG 作成・DB outputs を使用）→ イメージ build/push → migrate 実行
-      #   3) DB を再 apply して API の SG を許可（API→RDS 疎通）→ ECS 再デプロイ
-      - name: UP - 1) DB apply (without API SG)
+      - name: UP - terraform apply（単一 state を一括構築）
         if: steps.act.outputs.action == 'up'
-        working-directory: ${{ env.DB_TF }}
+        working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_api_security_group_ids: "[]"
-        run: |
-          terraform init
-          terraform apply -auto-approve
-
-      - name: UP - capture DB outputs
-        if: steps.act.outputs.action == 'up'
-        id: dbout
-        working-directory: ${{ env.DB_TF }}
-        run: |
-          echo "db_secret_arn=$(terraform output -raw db_secret_arn)" >> "$GITHUB_OUTPUT"
-          echo "rds_sg=$(terraform output -raw rds_security_group_id)" >> "$GITHUB_OUTPUT"
-
-      - name: UP - 2) API apply
-        if: steps.act.outputs.action == 'up'
-        working-directory: ${{ env.API_TF }}
-        env:
-          TF_VAR_db_secret_arn: ${{ steps.dbout.outputs.db_secret_arn }}
-          TF_VAR_rds_security_group_id: ${{ steps.dbout.outputs.rds_sg }}
           TF_VAR_image_tag: ${{ github.sha }}
         run: |
           terraform init
@@ -124,55 +85,53 @@ jobs:
 
       - name: UP - build & push images (api + migrate)
         if: steps.act.outputs.action == 'up'
+        working-directory: ${{ env.TF_DIR }}
         run: |
-          set -euo pipefail
-          aws ecr get-login-password --region "$AWS_REGION" \
-            | docker login --username AWS --password-stdin "$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com"
+          set -e
           REG="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com"
-          # API イメージ（commit SHA タグ＝ECS タスク定義の image_tag と一致させる）
-          docker build --target runtime -t "$REG/${{ vars.AWS_ECR_REPOSITORY }}:${{ github.sha }}" api/
-          docker push "$REG/${{ vars.AWS_ECR_REPOSITORY }}:${{ github.sha }}"
-          # マイグレーションイメージ
-          docker build -f db/Dockerfile.migrate -t "$REG/character-db-migrate:${{ github.sha }}" db/
-          docker push "$REG/character-db-migrate:${{ github.sha }}"
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REG"
+          API_ECR="$(terraform output -raw ecr_repository_url)"
+          MIGRATE_ECR="$(terraform output -raw migrate_ecr_repository_url)"
+          # ビルド元はどちらも character-api-go（schema/migrations と Dockerfile を所有）。
+          docker build --target runtime -t "$API_ECR:${{ github.sha }}" "$GITHUB_WORKSPACE/api"
+          docker push "$API_ECR:${{ github.sha }}"
+          docker build -f "$GITHUB_WORKSPACE/api/Dockerfile.migrate" -t "$MIGRATE_ECR:${{ github.sha }}" "$GITHUB_WORKSPACE/api"
+          docker push "$MIGRATE_ECR:${{ github.sha }}"
 
-      - name: UP - 3) DB re-apply (allow API SG)
+      - name: UP - run DB migration (atlas → views → seeds)
         if: steps.act.outputs.action == 'up'
-        working-directory: ${{ env.DB_TF }}
+        working-directory: ${{ env.TF_DIR }}
         run: |
-          # API の ECS SG を取得して RDS に許可する（循環依存の解消）。
-          API_SG="$(terraform -chdir=../../../../api-infra/terraform/environments/prod output -raw ecs_security_group_id)"
-          terraform apply -auto-approve -var="api_security_group_ids=[\"$API_SG\"]"
-
-      - name: UP - 4) run DB migration (atlas → views → seeds)
-        if: steps.act.outputs.action == 'up'
-        working-directory: ${{ env.DB_TF }}
-        run: |
-          set -euo pipefail
+          set -e
+          CLUSTER="$(terraform output -raw ecs_cluster_name)"
           MIGRATE_SG="$(terraform output -raw migrate_security_group_id)"
           SUBNETS="$(terraform output -json private_subnet_ids | jq -r 'join(",")')"
           TASK_ARN=$(aws ecs run-task \
-            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --cluster "$CLUSTER" \
             --task-definition character-db-migrate \
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$MIGRATE_SG],assignPublicIp=DISABLED}" \
             --query 'tasks[0].taskArn' --output text)
-          aws ecs wait tasks-stopped --cluster "${{ vars.ECS_CLUSTER }}" --tasks "$TASK_ARN"
-          EXIT_CODE=$(aws ecs describe-tasks --cluster "${{ vars.ECS_CLUSTER }}" --tasks "$TASK_ARN" \
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
             --query 'tasks[0].containers[0].exitCode' --output text)
           [ "$EXIT_CODE" = "0" ] || { echo "migration failed (exit $EXIT_CODE)"; exit 1; }
 
-      - name: UP - 5) redeploy API with latest image
+      - name: UP - redeploy API with latest image
         if: steps.act.outputs.action == 'up'
+        working-directory: ${{ env.TF_DIR }}
         run: |
-          aws ecs update-service --cluster "${{ vars.ECS_CLUSTER }}" --service "${{ vars.ECS_SERVICE }}" --force-new-deployment
-          aws ecs wait services-stable --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ vars.ECS_SERVICE }}"
+          set -e
+          CLUSTER="$(terraform output -raw ecs_cluster_name)"
+          SERVICE="$(terraform output -raw ecs_service_name)"
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
 
-      - name: UP - 6) smoke test (ALB /healthz が 200 を返すまで待つ)
+      - name: UP - smoke test (ALB /healthz が 200 を返すまで待つ)
         if: steps.act.outputs.action == 'up'
-        working-directory: ${{ env.API_TF }}
+        working-directory: ${{ env.TF_DIR }}
         run: |
-          set -euo pipefail
+          set -e
           EP="$(terraform output -raw api_endpoint)"
           echo "endpoint: $EP"
           for i in $(seq 1 20); do
@@ -185,26 +144,14 @@ jobs:
 
       - name: UP - summary
         if: steps.act.outputs.action == 'up'
-        working-directory: ${{ env.API_TF }}
+        working-directory: ${{ env.TF_DIR }}
         run: terraform output || true
 
       # ───────────────────────── DOWN（全削除）─────────────────────────
-      # 依存の逆順で destroy（API → DB）。VPC/サブネット/API キー Secret は switch 外なので残る。
-      - name: DOWN - destroy API
+      # 単一 state なので一括 destroy。API キー Secret は switch 外（永続）なので残る。
+      - name: DOWN - terraform destroy（一括削除）
         if: steps.act.outputs.action == 'down'
-        working-directory: ${{ env.API_TF }}
-        env:
-          TF_VAR_db_secret_arn: "arn:aws:secretsmanager:dummy"
-          TF_VAR_rds_security_group_id: "sg-dummy"
-        run: |
-          terraform init
-          terraform destroy -auto-approve
-
-      - name: DOWN - destroy DB
-        if: steps.act.outputs.action == 'down'
-        working-directory: ${{ env.DB_TF }}
-        env:
-          TF_VAR_api_security_group_ids: "[]"
+        working-directory: ${{ env.TF_DIR }}
         run: |
           terraform init
           terraform destroy -auto-approve

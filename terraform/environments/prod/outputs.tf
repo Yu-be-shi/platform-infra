@@ -4,7 +4,7 @@ output "api_endpoint" {
 }
 
 output "ecr_repository_url" {
-  description = "Docker イメージの push 先（CI の AWS_ECR_REPOSITORY に設定する）"
+  description = "API イメージの push 先（CI の AWS_ECR_REPOSITORY に設定する）"
   value       = module.ecs.ecr_repository_url
 }
 
@@ -18,7 +18,26 @@ output "ecs_service_name" {
   value       = module.ecs.ecs_service_name
 }
 
-output "ecs_security_group_id" {
-  description = "db-infra の api_security_group_ids に追加する ECS SG ID"
-  value       = module.ecs.ecs_security_group_id
+output "migrate_ecr_repository_url" {
+  description = "マイグレーションイメージの push 先（CI）"
+  value       = module.migrate.ecr_repository_url
+}
+
+output "migrate_security_group_id" {
+  description = "マイグレーション ECS タスク実行時に使う SG（CI の MIGRATION_SG_ID）"
+  value       = module.migrate.security_group_id
+}
+
+output "db_secret_arn" {
+  description = "DB 認証情報の Secrets Manager ARN（参考・同一 state 内で完結）"
+  value       = module.db.secret_arn
+}
+
+output "vpc_id" {
+  value = module.network.vpc_id
+}
+
+output "private_subnet_ids" {
+  description = "マイグレーション ECS タスク実行時に使う private subnet（CI の MIGRATION_SUBNETS）"
+  value       = module.network.private_subnet_ids
 }
