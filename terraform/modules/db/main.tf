@@ -46,11 +46,17 @@ resource "aws_security_group" "rds" {
   description = "Allow PostgreSQL access from API"
   vpc_id      = var.vpc_id
 
-  ingress {
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = var.allowed_security_group_ids
+  # allowed_security_group_ids が空のときは inline ingress を作らない。
+  # 単一 state では API(ECS)⇄RDS の SG 相互参照が循環するため、ingress は呼び出し側の
+  # standalone aws_security_group_rule で付与する（migrate モジュールと同じ流儀）。
+  dynamic "ingress" {
+    for_each = length(var.allowed_security_group_ids) > 0 ? [1] : []
+    content {
+      from_port       = 5432
+      to_port         = 5432
+      protocol        = "tcp"
+      security_groups = var.allowed_security_group_ids
+    }
   }
 
   egress {
