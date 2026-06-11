@@ -1,8 +1,8 @@
 # STG（自宅サーバー）へのキャラクター基盤スタック（PostgreSQL + migrate + API）デプロイ。
 # 中央プラットフォームが character-db-net を作成し DB/API を起動する（旧 db-infra + api-infra の
 # 2 スタックを1つに統合）。アプリ(Next.js)スタックは別 deploy-stg で character-db-net に参加する。
-# 前提: self-hosted runner ラベル character-stg、$STG_ROOT 配下に platform-infra と
-#       apis/character-api-go が clone 済み。
+# 前提: self-hosted runner ラベル character-stg、$STG_ROOT/repositories 配下に ys-infrastructure と
+#       apis/ys-character-api が clone 済み。
 name: Deploy STG (home)
 
 # STG は `staging` ブランチの鏡。develop マージでは STG を触らない。staging へ promote するか
@@ -26,9 +26,9 @@ jobs:
         run: |
           set -e
           ROOT="${STG_ROOT:-$HOME/character-system}"
-          # API 本体（ビルド元：schema/migrations/Dockerfile を所有）と platform-infra を staging に最新化。
-          git -C "$ROOT/apis/character-api-go" fetch origin staging && git -C "$ROOT/apis/character-api-go" reset --hard origin/staging
-          git -C "$ROOT/platform-infra" fetch origin staging && git -C "$ROOT/platform-infra" reset --hard origin/staging
-          cd "$ROOT/platform-infra"
+          # API 本体（ビルド元：schema/migrations/Dockerfile を所有）と ys-infrastructure を staging に最新化。
+          git -C "$ROOT/repositories/apis/ys-character-api" fetch origin staging && git -C "$ROOT/repositories/apis/ys-character-api" reset --hard origin/staging
+          git -C "$ROOT/repositories/ys-infrastructure" fetch origin staging && git -C "$ROOT/repositories/ys-infrastructure" reset --hard origin/staging
+          cd "$ROOT/repositories/ys-infrastructure"
           # character-db-net を作成し、Postgres → migrate（atlas→views→seeds）→ API の順に起動する。
           docker compose up -d --build

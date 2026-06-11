@@ -10,7 +10,7 @@
 #
 # 必要な Secrets / Variables（リポジトリ設定）:
 #   secrets.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  … AWS 認証
-#   secrets.GH_PAT                                     … character-api-go を checkout する PAT(repo 読み取り)
+#   secrets.GH_PAT                                     … ys-character-api を checkout する PAT(repo 読み取り)
 #   secrets.TF_VAR_API_KEY_SECRET_ARN                  … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch 外で作成）
 #   vars.AWS_REGION (任意, 既定 ap-northeast-1) / vars.CORS_ORIGINS (任意)
 name: Prod Switch (AWS ephemeral)
@@ -55,11 +55,11 @@ jobs:
             echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # platform-infra（terraform）をルートに、API 本体（Dockerfile / Dockerfile.migrate / schema）を api/ に。
+      # ys-infrastructure（terraform）をルートに、API 本体（Dockerfile / Dockerfile.migrate / schema）を api/ に。
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/character-api-go
+          repository: ${{ github.repository_owner }}/ys-character-api
           path: api
           ref: main
           token: ${{ secrets.GH_PAT }}
@@ -92,7 +92,7 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REG"
           API_ECR="$(terraform output -raw ecr_repository_url)"
           MIGRATE_ECR="$(terraform output -raw migrate_ecr_repository_url)"
-          # ビルド元はどちらも character-api-go（schema/migrations と Dockerfile を所有）。
+          # ビルド元はどちらも ys-character-api（schema/migrations と Dockerfile を所有）。
           docker build --target runtime -t "$API_ECR:${{ github.sha }}" "$GITHUB_WORKSPACE/api"
           docker push "$API_ECR:${{ github.sha }}"
           docker build -f "$GITHUB_WORKSPACE/api/Dockerfile.migrate" -t "$MIGRATE_ECR:${{ github.sha }}" "$GITHUB_WORKSPACE/api"
