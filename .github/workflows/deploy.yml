@@ -2,7 +2,7 @@ name: Infra CI
 
 # PR 時の Terraform 静的検証のみ（fmt + validate）。AWS 認証は不要。
 # 本番(AWS)の構築/削除は prod-switch.yml の up/down だけが行う（ephemeral 運用）。
-# API 本体コードのテストは character-api-go の CI が担う（ここでは行わない）。
+# API 本体コードのテストは ys-character-api の CI が担う（ここでは行わない）。
 on:
   pull_request:
 

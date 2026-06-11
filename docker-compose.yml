@@ -2,10 +2,10 @@
 # 中央プラットフォームが character-db-net を作成し、DB と API を起動する所有者。
 # アプリ(Next.js)スタックはこの character-db-net に external 接続する。
 #
-# 前提レイアウト（$ROOT 配下）:
-#   character-system/
-#   ├── apis/character-api-go/   (API 本体 + schema/migrations + Dockerfile / Dockerfile.migrate)
-#   └── platform-infra/          (このファイル)
+# 前提レイアウト（repositories/ 配下）:
+#   repositories/
+#   ├── apis/ys-character-api/   (API 本体 + schema/migrations + Dockerfile / Dockerfile.migrate)
+#   └── ys-infrastructure/       (このファイル)
 #
 # 起動: docker compose up --build -d
 
@@ -30,10 +30,10 @@ services:
       - character-db-net
 
   # マイグレーション（atlas apply → views → seeds）。schema/migrations を所有する
-  # character-api-go の Dockerfile.migrate からビルドする。
+  # ys-character-api の Dockerfile.migrate からビルドする。
   character-db-migrate:
     build:
-      context: ../apis/character-api-go
+      context: ../apis/ys-character-api
       dockerfile: Dockerfile.migrate
     command:
       - "--url=postgres://${CHAR_DB_USER:-app}:${CHAR_DB_PASSWORD:-devpassword}@character-db:5432/${CHAR_DB_NAME:-characters}?sslmode=disable"
@@ -46,7 +46,7 @@ services:
 
   character-api:
     build:
-      context: ../apis/character-api-go
+      context: ../apis/ys-character-api
       dockerfile: Dockerfile
       target: runtime
     environment:
