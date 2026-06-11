@@ -10,9 +10,12 @@
 #
 # 必要な Secrets / Variables（リポジトリ設定）:
 #   secrets.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  … AWS 認証
-#   secrets.GH_PAT                                     … ys-character-api を checkout する PAT(repo 読み取り)
-#   secrets.TF_VAR_API_KEY_SECRET_ARN                  … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch 外で作成）
-#   vars.AWS_REGION (任意, 既定 ap-northeast-1) / vars.CORS_ORIGINS (任意)
+#   secrets.GH_PAT                 … ys-character-api を checkout する PAT(repo 読み取り)
+#   secrets.TF_VAR_API_KEY_SECRET_ARN … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch 外で作成）
+#   vars.AWS_REGION (任意, 既定 ap-northeast-1)
+#   vars.CORS_ORIGINS              … CORS 許可オリジン（カンマ区切り。未設定時は up を拒否）
+#   vars.TF_STATE_BUCKET           … Terraform state 用 S3 バケット名
+#   vars.TF_LOCK_TABLE             … Terraform state ロック用 DynamoDB テーブル名（省略可）
 name: Prod Switch (AWS ephemeral)
 
 on:
@@ -80,7 +83,10 @@ jobs:
         env:
           TF_VAR_image_tag: ${{ github.sha }}
         run: |
-          terraform init
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            ${{ vars.TF_LOCK_TABLE != '' && format('-backend-config="dynamodb_table={0}"', vars.TF_LOCK_TABLE) || '' }}
           terraform apply -auto-approve
 
       - name: UP - build & push images (api + migrate)
@@ -153,5 +159,8 @@ jobs:
         if: steps.act.outputs.action == 'down'
         working-directory: ${{ env.TF_DIR }}
         run: |
-          terraform init
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            ${{ vars.TF_LOCK_TABLE != '' && format('-backend-config="dynamodb_table={0}"', vars.TF_LOCK_TABLE) || '' }}
           terraform destroy -auto-approve

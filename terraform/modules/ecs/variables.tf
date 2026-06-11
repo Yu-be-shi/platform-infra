@@ -78,7 +78,7 @@ variable "alb_listener_arn" {
 }
 
 variable "db_secret_arn" {
-  description = "DB 認証情報の Secrets Manager ARN（db-infra の output から取得）"
+  description = "DB 認証情報の Secrets Manager ARN（module.db.secret_arn から取得）"
   type        = string
 }
 
@@ -88,7 +88,7 @@ variable "api_key_secret_arn" {
 }
 
 variable "rds_security_group_id" {
-  description = "RDS セキュリティグループ ID（db-infra の output から取得。ECS SG を RDS に登録するために使用）"
+  description = "RDS セキュリティグループ ID（module.db.security_group_id から取得）"
   type        = string
 }
 

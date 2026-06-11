@@ -32,3 +32,20 @@ jobs:
           cd "$ROOT/repositories/ys-infrastructure"
           # character-db-net を作成し、Postgres → migrate（atlas→views→seeds）→ API の順に起動する。
           docker compose up -d --build
+
+      - name: Smoke test (API /healthz が 200 を返すまで待つ)
+        env:
+          STG_ROOT: ${{ vars.STG_ROOT }}
+        run: |
+          set -e
+          # STG は compose で 8080 をホストに公開。localhost で確認する。
+          EP="${STG_API_ENDPOINT:-http://localhost:8080}"
+          echo "endpoint: $EP"
+          for i in $(seq 1 30); do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' "$EP/healthz" || true)
+            if [ "$code" = "200" ]; then echo "healthz OK"; exit 0; fi
+            echo "waiting healthz ($i/30): got '$code'"; sleep 5
+          done
+          echo "smoke test failed: /healthz が 200 を返しませんでした" >&2
+          docker compose -f "$ROOT/repositories/ys-infrastructure/docker-compose.yml" logs --tail=50 || true
+          exit 1
