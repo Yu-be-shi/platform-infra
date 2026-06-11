@@ -1,61 +1,26 @@
-name: API Infra CI
+name: Infra CI
 
-# 注意: 本番(AWS)への適用・デプロイは **このワークフローでは行わない**。
-# AWS は使い捨て(ephemeral)運用とし、構築/削除は prod-switch.yml の up/down だけが行う。
-# ここは PR 時の静的解析・テスト・terraform plan（差分提示）のみ。main への push では AWS を一切触らない。
+# PR 時の Terraform 静的検証のみ（fmt + validate）。AWS 認証は不要。
+# 本番(AWS)の構築/削除は prod-switch.yml の up/down だけが行う（ephemeral 運用）。
+# API 本体コードのテストは character-api-go の CI が担う（ここでは行わない）。
 on:
   pull_request:
 
-env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
-  TF_WORKING_DIR: terraform/environments/prod
-
 jobs:
-  # ─── CI: 静的解析 + ユニットテスト（API 本体コード）────────────────────────
-  test:
-    name: Vet & Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/character-api-go
-          path: api
-          token: ${{ secrets.GH_PAT }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache-dependency-path: api/go.sum
-
-      - name: Vet & Test
-        working-directory: api
-        run: |
-          go vet ./...
-          go test ./...
-
-  # ─── Terraform plan（PR に差分を提示するだけ。apply はしない）──────────────
-  terraform-plan:
-    name: Terraform Plan
+  terraform:
+    name: Terraform fmt & validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init
-      - name: Terraform Plan
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform plan -no-color
-        env:
-          TF_VAR_vpc_id: ${{ secrets.TF_VAR_VPC_ID }}
-          TF_VAR_public_subnet_ids: ${{ secrets.TF_VAR_PUBLIC_SUBNET_IDS }}
-          TF_VAR_private_subnet_ids: ${{ secrets.TF_VAR_PRIVATE_SUBNET_IDS }}
-          TF_VAR_db_secret_arn: ${{ secrets.TF_VAR_DB_SECRET_ARN }}
-          TF_VAR_rds_security_group_id: ${{ secrets.TF_VAR_RDS_SG_ID }}
-          TF_VAR_api_key_secret_arn: ${{ secrets.TF_VAR_API_KEY_SECRET_ARN }}
+          terraform_wrapper: false
+
+      - name: fmt
+        run: terraform fmt -check -recursive
+
+      - name: validate (environments/prod)
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate -no-color
