@@ -40,7 +40,7 @@ jobs:
           exit-code: "0"
       # Dependabot/fork PR は GITHUB_TOKEN が read-only に強制され security-events: write が
       # 無効化されるため、push か「同一リポジトリ発の非 Dependabot PR」のときだけ upload する。
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         if: >-
           github.event_name == 'push' ||
           (github.event.pull_request.head.repo.full_name == github.repository &&
