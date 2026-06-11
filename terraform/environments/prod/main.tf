@@ -41,6 +41,7 @@ module "migrate" {
   source = "../../modules/migrate"
 
   aws_region            = var.aws_region
+  image_tag             = var.image_tag
   vpc_id                = module.network.vpc_id
   private_subnet_ids    = module.network.private_subnet_ids
   db_secret_arn         = module.db.secret_arn
