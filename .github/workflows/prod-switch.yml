@@ -13,6 +13,8 @@
 #   secrets.GH_PAT                 … ys-character-api を checkout する PAT(repo 読み取り)
 #   secrets.TF_VAR_API_KEY_SECRET_ARN … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch 外で作成）
 #   vars.AWS_REGION (任意, 既定 ap-northeast-1)
+#   vars.AWS_DEPLOY_ROLE_ARN (任意) … GitHub OIDC ロール ARN（cost-guardrails apply 後に設定）。
+#                                    未設定時は長期キーで動作（移行期間中の後方互換）
 #   vars.CORS_ORIGINS              … CORS 許可オリジン（カンマ区切り。未設定時は空=拒否）
 #   vars.TF_STATE_BUCKET           … Terraform state 用 S3 バケット名
 #   vars.TF_LOCK_TABLE             … Terraform state ロック用 DynamoDB テーブル名（省略可）
