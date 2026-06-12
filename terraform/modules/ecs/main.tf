@@ -23,6 +23,14 @@ resource "aws_ecr_repository" "api" {
 
 resource "aws_ecs_cluster" "main" {
   name = var.cluster_name
+
+  # Container Insights を有効化: RunningTaskCount 等の詳細メトリクスを発行する。
+  # 無効だと ecs_no_running_tasks アラームがデータ欠損（≒常時 breaching）になる。
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
   tags = var.tags
 }
 
@@ -75,11 +83,14 @@ resource "aws_security_group" "ecs" {
     security_groups = [var.alb_security_group_id]
   }
 
+  # HTTPS 443: ECR イメージ pull・Secrets Manager・CloudWatch Logs への通信。
+  # VPC エンドポイントを追加すれば 443 も不要になるがコスト増のため許容。
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS outbound（ECR pull, Secrets Manager, CloudWatch Logs）"
   }
 
   tags = var.tags
@@ -222,7 +233,11 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
   tags          = var.tags
 }
 
+# ephemeral 環境では意図的に down する（タスク 0 が正常）ため、アラームを作らない。
+# non-ephemeral（常設）環境でのみ作成し、タスク停止を検知する。
 resource "aws_cloudwatch_metric_alarm" "ecs_no_running_tasks" {
+  count = var.ephemeral ? 0 : 1
+
   alarm_name          = "${var.service_name}-no-running-tasks"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2

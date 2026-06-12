@@ -14,6 +14,6 @@ output "ecs_service_name" {
 }
 
 output "ecs_security_group_id" {
-  description = "ECS タスクのセキュリティグループ ID（db-infra の allowed_security_group_ids に追加する）"
+  description = "ECS タスクのセキュリティグループ ID（prod/main.tf の standalone SG ルールで RDS へのアクセスを許可）"
   value       = aws_security_group.ecs.id
 }

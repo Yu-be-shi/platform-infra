@@ -59,12 +59,8 @@ resource "aws_security_group" "rds" {
     }
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # RDS は外部への発信を行わないため egress は不要。
+  # （管理面は AWS 内部ネットワーク経由で行われ、SG egress の対象外）
 
   tags = var.tags
 }

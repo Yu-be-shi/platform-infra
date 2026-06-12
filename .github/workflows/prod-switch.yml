@@ -9,13 +9,14 @@
 #   up のたびに seeds で初期データ（races 等）が再投入される。
 #
 # 必要な Secrets / Variables（リポジトリ設定）:
-#   secrets.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  … AWS 認証
+#   secrets.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  … AWS 認証（OIDC 化後は不要・削除予定）
 #   secrets.GH_PAT                 … ys-character-api を checkout する PAT(repo 読み取り)
 #   secrets.TF_VAR_API_KEY_SECRET_ARN … INTERNAL_API_KEY の Secrets Manager ARN（永続・switch 外で作成）
 #   vars.AWS_REGION (任意, 既定 ap-northeast-1)
-#   vars.CORS_ORIGINS              … CORS 許可オリジン（カンマ区切り。未設定時は up を拒否）
+#   vars.CORS_ORIGINS              … CORS 許可オリジン（カンマ区切り。未設定時は空=拒否）
 #   vars.TF_STATE_BUCKET           … Terraform state 用 S3 バケット名
 #   vars.TF_LOCK_TABLE             … Terraform state ロック用 DynamoDB テーブル名（省略可）
+#   vars.DOWN_ALERT_SNS_ARN        … down 失敗時に通知する SNS topic ARN（任意。cost-guardrails の topic 等）
 name: Prod Switch (AWS ephemeral)
 
 on:
@@ -32,6 +33,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write  # OIDC トークン取得（AWS AssumeRoleWithWebIdentity）に必要
 
 concurrency:
   group: prod-switch
@@ -41,7 +43,9 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
   TF_DIR: terraform/environments/prod
   TF_VAR_api_key_secret_arn: ${{ secrets.TF_VAR_API_KEY_SECRET_ARN }}
-  TF_VAR_cors_origins: ${{ vars.CORS_ORIGINS || '*' }}
+  # vars.CORS_ORIGINS 未設定時は空文字にする（API が拒否）。
+  # * は本番では避けること（ヘッダのコメントを参照）。
+  TF_VAR_cors_origins: ${{ vars.CORS_ORIGINS }}
   TF_VAR_ephemeral: "true"
 
 jobs:
@@ -67,10 +71,17 @@ jobs:
           ref: main
           token: ${{ secrets.GH_PAT }}
 
+      # OIDC で AssumeRole（長期キー不要）。
+      # vars.AWS_DEPLOY_ROLE_ARN に IAM ロール ARN を設定すること。
+      # ロールの trust policy は sub を以下に限定:
+      #   repo:<owner>/ys-infrastructure:environment:production
+      # 移行期間中（OIDC ロール未作成）は secrets.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY で
+      # 動作するよう role-to-assume が未設定時は長期キーにフォールバックする。
       - uses: aws-actions/configure-aws-credentials@v6
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-access-key-id: ${{ vars.AWS_DEPLOY_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_DEPLOY_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
           aws-region: ${{ env.AWS_REGION }}
       - uses: hashicorp/setup-terraform@v4
         with:
@@ -156,6 +167,7 @@ jobs:
       # ───────────────────────── DOWN（全削除）─────────────────────────
       # 単一 state なので一括 destroy。API キー Secret は switch 外（永続）なので残る。
       - name: DOWN - terraform destroy（一括削除）
+        id: destroy
         if: steps.act.outputs.action == 'down'
         working-directory: ${{ env.TF_DIR }}
         run: |
@@ -164,3 +176,13 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}" \
             ${{ vars.TF_LOCK_TABLE != '' && format('-backend-config="dynamodb_table={0}"', vars.TF_LOCK_TABLE) || '' }}
           terraform destroy -auto-approve
+
+      # down が失敗＝課金リソースが残存している可能性。SNS で即座に通知する。
+      # vars.DOWN_ALERT_SNS_ARN を設定しない場合はスキップ（通知不要な環境向け）。
+      - name: DOWN - notify on failure
+        if: failure() && steps.destroy.conclusion == 'failure' && vars.DOWN_ALERT_SNS_ARN != ''
+        run: |
+          aws sns publish \
+            --topic-arn "${{ vars.DOWN_ALERT_SNS_ARN }}" \
+            --subject "【要対応】prod-switch DOWN が失敗しました" \
+            --message "GitHub Actions の terraform destroy が失敗しました。課金リソースが残存している可能性があります。Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
