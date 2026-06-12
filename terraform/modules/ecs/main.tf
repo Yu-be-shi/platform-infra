@@ -90,7 +90,7 @@ resource "aws_security_group" "ecs" {
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS outbound（ECR pull, Secrets Manager, CloudWatch Logs）"
+    description = "HTTPS outbound (ECR pull, Secrets Manager, CloudWatch Logs)"
   }
 
   tags = var.tags
@@ -223,7 +223,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
   period              = 60
   statistic           = "Average"
   threshold           = 80
-  alarm_description   = "ECS サービスの CPU 使用率が高い"
+  alarm_description   = "ECS service CPU utilization is high"
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
     ServiceName = aws_ecs_service.api.name
@@ -246,7 +246,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_no_running_tasks" {
   period              = 60
   statistic           = "Average"
   threshold           = 1
-  alarm_description   = "稼働中の ECS タスクが無い（サービス停止）"
+  alarm_description   = "No running ECS tasks - service may be down"
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
     ServiceName = aws_ecs_service.api.name

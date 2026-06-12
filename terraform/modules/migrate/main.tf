@@ -61,7 +61,7 @@ resource "aws_iam_role_policy" "migrate_secrets" {
 # マイグレーションタスク専用 SG
 resource "aws_security_group" "migrate" {
   name        = "${var.name}-task"
-  description = "Migration ECS task — egress to RDS + HTTPS only"
+  description = "Migration ECS task - egress to RDS and HTTPS only"
   vpc_id      = var.vpc_id
 
   # HTTPS 443: ECR イメージ pull・Secrets Manager・CloudWatch Logs への通信。
@@ -70,7 +70,7 @@ resource "aws_security_group" "migrate" {
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS outbound（ECR pull, Secrets Manager, CloudWatch Logs）"
+    description = "HTTPS outbound (ECR pull, Secrets Manager, CloudWatch Logs)"
   }
   # PostgreSQL: RDS への接続（SG ルールは rds_allow_migrate で RDS SG 側にも追加）。
   egress {
@@ -78,7 +78,7 @@ resource "aws_security_group" "migrate" {
     to_port     = 5432
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "PostgreSQL outbound to RDS（VPC 内のみ届く）"
+    description = "PostgreSQL outbound to RDS (within VPC)"
   }
 
   tags = var.tags
