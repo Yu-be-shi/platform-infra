@@ -18,9 +18,9 @@ variable "api_key_secret_arn" {
 }
 
 variable "cors_origins" {
-  description = "CORS 許可オリジン（カンマ区切り）。ドメイン未取得なら一時的に '*' か STG オリジン等"
+  description = "CORS 許可オリジン（カンマ区切り）。空文字の場合 API は全オリジンを拒否する。本番では具体的なオリジンを vars.CORS_ORIGINS に設定すること（'*' は非推奨）"
   type        = string
-  default     = "*"
+  default     = ""
 }
 
 variable "ephemeral" {

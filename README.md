@@ -1,109 +1,166 @@
-# api-infra
+# ys-infrastructure
 
-character-api（Go/Echo）専用のインフラリポジトリ。
-API サーバーのプロビジョニング・デプロイ・セキュリティ境界を管理する。
+character-system の中央インフラリポジトリ。character-api（Go）の実行基盤と、ローカル開発用
+compose スタックを管理する。**アプリ・API はインフラを知らない。インフラはサービスの成果物
+（Dockerfile / schema）だけを参照する**（一方向依存）。
 
 ## 責務
 
-- AWS ECS Fargate + ALB + ECR のプロビジョニング（Terraform）
-- Docker イメージのビルド・push・ECS デプロイ CI（GitHub Actions）
-- ローカル・CI 用の API + DB 起動（Docker Compose）
+| 対象 | 管理内容 |
+|---|---|
+| ローカル compose | PostgreSQL + migrate(atlas/views/seeds) + Go API + Redis（`character-db-net` 作成） |
+| AWS Terraform | network(VPC/subnet) / RDS(PostgreSQL) / migrate(ECS task) / ALB / ECS Fargate / ECR / Secrets Manager / cost-guardrails |
+| デプロイ CI | `prod-switch.yml`（AWS ephemeral up/down）/ `deploy-stg.yml`（自宅 STG） |
 
-## リポジトリレイアウト前提
+インフラは **単一 state**（`terraform/environments/prod`）で上記 AWS リソース全体を1回の
+`terraform apply` で構築する。旧来の「DB インフラ → API インフラ」2段 apply・VPC/subnet の手動
+受け渡しは廃止済み（`module.network` が自前 provision）。
+
+---
+
+## リポジトリレイアウト
 
 ```
-workspace/
-├── db/         # character-db
-├── api/        # character-api
-└── api-infra/  # このリポジトリ
+ys-infrastructure/
+├── docker-compose.yml            # 基盤スタック（character-db-net を作成）
+├── migrate-entrypoint.sh         # migrate: atlas apply → views → seeds
+├── terraform/
+│   ├── environments/
+│   │   ├── prod/                 # 本番（AWS 単一 state）
+│   │   │   ├── backend.tf        # S3 backend（CI 注入、プレースホルダなし）
+│   │   │   ├── main.tf           # module 呼び出し・SG standalone ルール
+│   │   │   ├── variables.tf      # cors_origins / api_key_secret_arn 等
+│   │   │   └── outputs.tf
+│   │   ├── stg/                  # STG（compose ベース、Terraform 非使用）
+│   │   └── cost-guardrails/      # 別 state（Budget / SNS アラート）
+│   └── modules/
+│       ├── network/              # VPC / public+private subnet / NAT
+│       ├── db/                   # RDS PostgreSQL / Secrets Manager（DSN）
+│       ├── migrate/              # ECR(migrate) / ECS タスク定義 / SG
+│       ├── alb/                  # ALB / target group / HTTP リスナー
+│       ├── ecs/                  # ECR(api) / ECS cluster+service / CloudWatch アラーム
+│       └── cost-guardrails/      # Budget / SNS topic（単独 module）
+└── .github/workflows/
+    ├── prod-switch.yml           # 本番 ephemeral up/down（手動+夜間自動）
+    ├── deploy-stg.yml            # STG compose デプロイ（staging push）
+    ├── deploy.yml                # Infra CI（terraform fmt/validate、PR 時）
+    └── security.yml              # gitleaks + trivy(IaC)
 ```
 
-## 環境別の使い方
+---
 
-### ローカル / CI（API + DB 起動）
+## ローカル起動
 
 ```bash
-docker compose up
+# 基盤スタック（PostgreSQL → migrate(atlas→views→seeds) → API → Redis）
+# character-db-net を作成し、アプリ compose が external で参加できるようにする。
+docker compose up -d --build
+
+# または メタリポジトリ直下で:
+# make up
 ```
 
-### 本番（Terraform）
+アプリ（Next.js + MySQL）は `character-application-nextjs` の compose で別途起動する。
+
+完全リセット（DB ボリューム含む）:
 
 ```bash
-cd terraform/environments/prod
-
-terraform init
-cp prod.tfvars.example prod.tfvars  # 値を編集する
-
-terraform plan  -var-file=prod.tfvars
-terraform apply -var-file=prod.tfvars
+docker compose down -v
 ```
 
-`prod.tfvars` に設定する値のうち、`db_secret_arn` と `rds_security_group_id` は
-**db-infra の `terraform output`** から取得する。
+マイグレーションのみ再実行（migrations / views / seeds をイメージに反映して再適用）:
 
-## セキュリティ境界
+```bash
+docker compose run --rm --build character-db-migrate
+```
 
-- ECS タスクはプライベートサブネットに配置し、ALB 経由でのみ公開
-- DB 接続情報（DSN）は Secrets Manager から取得。タスク定義に平文で書かない
-- DB へのアクセスは ECS のセキュリティグループのみに限定（db-infra 側で制御）
-- `INTERNAL_API_KEY` も Secrets Manager から注入（`TF_VAR_API_KEY_SECRET_ARN`）。
-  application 側の `CHARACTER_API_KEY` と同値にすること（不一致だと API が 401）
+---
 
-## 冪等性キー用 Redis（character-api 専有）
+## 本番スイッチ（AWS ephemeral）
 
-`POST /characters` の二重送信を重複排除するため、character-api は Redis を使う。これは
-**character-api だけが使う private なストア**で、共有スキーマの `character-db` とは別物（Database per Service）。
+使う時だけ立てて普段は完全に消す「使い捨て本番」。
 
-- **ローカル**：この compose に `character-api-redis`（redis:7-alpine）を同梱。API へ
-  `REDIS_ADDR=character-api-redis:6379` を渡す。`REDIS_ADDR` 未設定なら冪等性機能は無効。
-- **本番**：コスト最小化のため ElastiCache を使わず、**ECS タスクに Redis サイドカーコンテナ**を同梱
-  （`modules/ecs`）。awsvpc なので API は `localhost:6379` で到達。タスクと一緒に作られ・消える。
+- **up**: `workflow_dispatch` → `terraform apply`（単一 state で一括構築）→
+  イメージ build/push → `ECS run-task` で migrate 実行 → ECS 再デプロイ → `/healthz` スモーク
+- **down**: 手動 or 毎日 03:00 JST（夜間自動）→ `terraform destroy`（一括削除）
+  失敗時は `vars.DOWN_ALERT_SNS_ARN` の SNS topic に通知
 
-## 本番スイッチ（AWS ephemeral / up・down）
+```
+[up]
+ 1) terraform apply（単一 state）
+    … network(VPC+NAT) / RDS / Secrets / migrate タスク定義 / ALB / ECS を一括構築
+    … API↔RDS の SG 相互参照は standalone ルール（prod/main.tf）で循環回避
+ 2) イメージ build & push
+    … api / migrate（ビルド元: ys-character-api, タグ: commit SHA, 全 ECR は IMMUTABLE）
+ 3) migrate 実行（ECS run-task）
+    … atlas migrate apply → views/*.sql → seeds/*.sql（終了コード検証、失敗で abort）
+ 4) ECS 再デプロイ → ALB /healthz スモークテスト（最大 200 秒ポーリング）
 
-使う時だけ立てて普段は完全に消す「使い捨て本番」。`.github/workflows/prod-switch.yml` を手動実行
-（Actions → Run workflow）で **up=一気に構築 / down=全削除**。毎日深夜に自動 down（消し忘れ防止）。
+[down]（手動 / 毎日 18:00 UTC = 03:00 JST）
+ terraform destroy（単一 state 一括削除）
+ API キー Secret は switch 外（恒久）なので残る
+ 失敗時 SNS 通知（vars.DOWN_ALERT_SNS_ARN 設定時）
+```
 
-- データは永続させない（`ephemeral=true` で RDS は削除保護無効・final snapshot 無し）。up のたびに
-  seeds で初期データを再投入。
-- up は循環依存（RDS↔API SG）を3段（DB→API→DB 再適用）で解消し、イメージ build/push と
-  マイグレーション・ECS 再デプロイまで実施。down は API→DB の順に destroy。
-- VPC/サブネット・`INTERNAL_API_KEY` の Secret は switch 外（恒久）。
-- **HTTPS は保留**（独自ドメイン未取得のため HTTP）。`modules/alb` は将来 ACM 証明書 ARN を変数で
-  受け取れば 443 リスナーを足せる構成にする余地を残す。
+- データは永続させない（`ephemeral=true`: RDS 削除保護なし / final snapshot 無し / ECR force_delete）。
+- DB 認証情報は Secrets Manager から ECS タスクへ `valueFrom` 注入（平文コードなし）。
+- up のたびに seeds で初期データ（races 等）を再投入する。
+- HTTPS はドメイン未取得のため保留（`modules/alb` は ACM ARN 変数追加で対応可能）。
 
-## CI（このリポジトリ）
+---
 
-- `deploy.yml` … `main` への通常デプロイ（ECS ローリング）。
-- `prod-switch.yml` … 上記の up/down スイッチ。
-- `deploy-stg.yml` … `develop` で**自宅 STG**（self-hosted runner）に compose デプロイ（後述）。
-- `security.yml` … gitleaks（秘密混入検査）。`dependabot.yml` で terraform/actions を定期更新。
+## STG（自宅サーバー）
 
-## STG（自宅サーバー）デプロイ
+`staging` ブランチへの push（または手動 `workflow_dispatch`）で、自宅 WSL の
+self-hosted runner（ラベル `character-stg`）が `$STG_ROOT` を最新化し
+`docker compose up -d --build` を実行。起動後 `/healthz` スモークテスト。
 
-`develop` への push で、自宅 WSL の **self-hosted runner（ラベル `character-stg`）** が
-`$STG_ROOT/apis/character-api-go-infra` を最新化し `docker compose up -d --build`。
-詳細・runner セットアップはメタリポジトリ README の「STG（自宅）」を参照。
+一度きりセットアップ: `$STG_ROOT` 配下に `character-system/` のレイアウトでリポジトリを clone
+→ GitHub に `character-stg` ラベルで self-hosted runner を登録 → 各 `.env` を配置。
 
-## 初回セットアップの順序
-
-1. **db-infra** で `terraform apply` → `db_secret_arn`、`rds_security_group_id` を取得
-2. **api-infra** の `prod.tfvars` に上記の値を設定して `terraform apply`
-3. api-infra の `terraform output` の `ecs_security_group_id` を db-infra の `api_security_group_ids` に追加して `terraform apply`
+---
 
 ## GitHub Actions に設定する Secrets / Variables
 
-| 種別 | 名前 | 説明 |
-|---|---|---|
-| Secret | `AWS_ACCESS_KEY_ID` | AWS 認証情報 |
-| Secret | `AWS_SECRET_ACCESS_KEY` | AWS 認証情報 |
-| Secret | `GH_PAT` | prod-switch が他リポジトリ(db-infra/api/db)を checkout する PAT（repo 読み取り） |
-| Secret | `TF_VAR_VPC_ID` | VPC ID |
-| Secret | `TF_VAR_PUBLIC_SUBNET_IDS` | パブリックサブネット ID（JSON 配列形式） |
-| Secret | `TF_VAR_PRIVATE_SUBNET_IDS` | プライベートサブネット ID（JSON 配列形式） |
-| Secret | `TF_VAR_DB_SECRET_ARN` | db-infra output: db_secret_arn |
-| Secret | `TF_VAR_RDS_SG_ID` | db-infra output: rds_security_group_id |
-| Secret | `TF_VAR_API_KEY_SECRET_ARN` | INTERNAL_API_KEY の Secrets Manager ARN |
-| Variable | `AWS_ECR_REPOSITORY` | terraform output: ecr_repository_url |
-| Variable | `ECS_CLUSTER` | terraform output: ecs_cluster_name |
-| Variable | `ECS_SERVICE` | terraform output: ecs_service_name |
+### Secrets（`settings/secrets/actions`）
+
+| 名前 | 説明 |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | AWS 認証（OIDC 移行後は不要。下記参照） |
+| `AWS_SECRET_ACCESS_KEY` | AWS 認証（同上） |
+| `GH_PAT` | `ys-character-api` を checkout する PAT（repo 読み取り） |
+| `TF_VAR_API_KEY_SECRET_ARN` | `INTERNAL_API_KEY` の Secrets Manager ARN（永続・switch 外で作成） |
+
+### Variables（`settings/variables/actions`）
+
+| 名前 | 説明 |
+|---|---|
+| `AWS_REGION` | AWS リージョン（省略時 `ap-northeast-1`） |
+| `AWS_DEPLOY_ROLE_ARN` | OIDC で assume する IAM ロール ARN（未設定時は長期キーで動作） |
+| `CORS_ORIGINS` | CORS 許可オリジン（カンマ区切り。**未設定時は空=API 全拒否**。本番では具体的に設定） |
+| `TF_STATE_BUCKET` | Terraform state 用 S3 バケット名 |
+| `TF_LOCK_TABLE` | state ロック用 DynamoDB テーブル名（省略可） |
+| `DOWN_ALERT_SNS_ARN` | down 失敗時に通知する SNS topic ARN（省略可。cost-guardrails の topic ARN 推奨） |
+
+### OIDC 化（長期キーからの移行手順）
+
+長期キーを廃止して GitHub OIDC に移行する（**長期キーは OIDC 成功確認後に削除**）。
+
+1. `cost-guardrails/main.tf` に IAM OIDC provider と deploy ロールを追加（または手動作成）:
+   - OIDC provider: `token.actions.githubusercontent.com`
+   - trust の `sub` を `repo:<owner>/ys-infrastructure:environment:production` に限定
+   - ポリシー: `AdministratorAccess`（または必要最小限 Terraform 権限）
+2. ロール ARN を `vars.AWS_DEPLOY_ROLE_ARN` に設定
+3. prod-switch.yml は `AWS_DEPLOY_ROLE_ARN` があれば OIDC で assume、なければ長期キーで動作（後方互換）
+4. OIDC で up/down が 1 サイクル成功したら長期キー Secret を削除
+
+---
+
+## セキュリティ境界
+
+- ECS タスクはプライベートサブネット配置、ALB 経由でのみ公開
+- SG egress: RDS は egress なし、ECS/migrate は HTTPS 443 のみ（+migrate は PostgreSQL 5432）
+- DB 接続情報は Secrets Manager から ECS タスクへ `valueFrom` 注入（タスク定義・変数に平文なし）
+- `INTERNAL_API_KEY` も Secrets Manager から注入（`TF_VAR_API_KEY_SECRET_ARN`）
+- Container Insights 有効化（ECS `RunningTaskCount` メトリクス発行）
+- cost-guardrails（別 state）: Budget アラート + SNS topic は恒久リソース（destroy 後も残る）

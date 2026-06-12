@@ -11,7 +11,7 @@ terraform {
 
 resource "aws_ecr_repository" "migrate" {
   name                 = var.name
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE" # CI は commit SHA タグで push するため上書き不要
 
   image_scanning_configuration {
     scan_on_push = true
@@ -61,14 +61,24 @@ resource "aws_iam_role_policy" "migrate_secrets" {
 # マイグレーションタスク専用 SG
 resource "aws_security_group" "migrate" {
   name        = "${var.name}-task"
-  description = "Migration ECS task — egress only"
+  description = "Migration ECS task - egress to RDS and HTTPS only"
   vpc_id      = var.vpc_id
 
+  # HTTPS 443: ECR イメージ pull・Secrets Manager・CloudWatch Logs への通信。
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS outbound (ECR pull, Secrets Manager, CloudWatch Logs)"
+  }
+  # PostgreSQL: RDS への接続（SG ルールは rds_allow_migrate で RDS SG 側にも追加）。
+  egress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "PostgreSQL outbound to RDS (within VPC)"
   }
 
   tags = var.tags
@@ -107,11 +117,11 @@ resource "aws_ecs_task_definition" "migrate" {
     name  = "migrate"
     image = "${aws_ecr_repository.migrate.repository_url}:${var.image_tag}"
 
-    # atlas migrate apply --dir file:///migrations --url <DB_DSN>
-    # ENTRYPOINT は Dockerfile.migrate に設定済み。--url だけ渡す。
-    command = [
-      "--url=$(DB_DSN)"
-    ]
+    # ECS exec 形式の command では $(VAR) のシェル展開が行われない。
+    # --url=$(DB_DSN) をリテラルで atlas に渡すと接続失敗する。
+    # migrate-entrypoint.sh は引数 --url= が存在しない場合に DB_DSN 環境変数へ
+    # フォールバックする（entrypoint.sh:21-24）ため、command を空にして env 注入に委ねる。
+    command = []
 
     secrets = [
       { name = "DB_DSN", valueFrom = "${var.db_secret_arn}:dsn::" }

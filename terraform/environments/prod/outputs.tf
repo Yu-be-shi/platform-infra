@@ -24,7 +24,7 @@ output "migrate_ecr_repository_url" {
 }
 
 output "migrate_security_group_id" {
-  description = "マイグレーション ECS タスク実行時に使う SG（CI の MIGRATION_SG_ID）"
+  description = "マイグレーション ECS タスク用 SG（prod-switch.yml の UP ステップで run-task に渡す）"
   value       = module.migrate.security_group_id
 }
 
@@ -38,6 +38,6 @@ output "vpc_id" {
 }
 
 output "private_subnet_ids" {
-  description = "マイグレーション ECS タスク実行時に使う private subnet（CI の MIGRATION_SUBNETS）"
+  description = "マイグレーション ECS タスク用 private subnet（prod-switch.yml の UP ステップで run-task に渡す）"
   value       = module.network.private_subnet_ids
 }
